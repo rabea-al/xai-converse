@@ -265,60 +265,6 @@ class ConverseStreamPartialResponse(Component):
 
 
 @xai_component
-class ConverseRunTool(Component):
-    chat_response: InArg[str]
-    
-    did_have_tool: OutArg[bool]
-    out_response: OutArg[str]
-    
-    def execute(self, ctx) -> None:
-        text = self.chat_response.value
-        print(text)
-        self.did_have_tool.value = 'TOOL:' in text
-        
-        if self.did_have_tool.value:
-            lines = text.split("\n")
-            for line in lines:
-                if line.startswith('TOOL:'):
-                    if "popeye" in line:
-                        try:
-                            # Run the command and capture the output
-                            completed_process = subprocess.run(
-                                ['./popeye', '--insecure-skip-tls-verify', '--kubeconfig', 'kubeconfig.yaml', '-o', 'jurassic'],
-                                check=True,
-                                text=True,
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE
-                            )
-                            # Set the standard output as the output
-                            self.out_response.value = completed_process.stdout
-                        except subprocess.CalledProcessError as e:
-                            # If there is an error, capture the output and the error message
-                            self.out_response.value = e.output if e.output else e.stderr
-                        break
-                    elif "kubectl" in line:
-                        # Extract the command after "TOOL: kubectl"
-                        command = line.split("kubectl", 1)[1].strip()
-                        
-                        try:
-                            # Run the command and capture the output
-                            completed_process = subprocess.run(
-                                ['./kubectl', '--insecure-skip-tls-verify', '--kubeconfig', 'kubeconfig.yaml'] + command.split(),
-                                check=True,
-                                text=True,
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE
-                            )
-                            # Set the standard output as the output
-                            self.out_response.value = completed_process.stdout
-                        except subprocess.CalledProcessError as e:
-                            # If there is an error, capture the output and the error message
-                            self.out_response.value = e.output if e.output else e.stderr
-                        break
-
-
-
-@xai_component
 class ConverseProcessCommand(Component):
     on_command: BaseComponent
     
