@@ -1,14 +1,17 @@
 from xai_components.base import InArg, OutArg, InCompArg, Component, BaseComponent, xai_component, SubGraphExecutor
-import subprocess
 import time
 import secrets
 import random
 import string
 import json
 
-from flask import Flask, Response, request, jsonify, redirect, render_template, session, abort, send_file
+from flask import Flask, Response, request, jsonify, redirect, abort, send_file, stream_with_context
+from flask.views import View
 from flask_cors import CORS
 
+CONVERSE_APP_KEY = "flask_app"
+CONVERSE_AGENTS_KEY = "converse_agents"
+CONVERSE_RES_KEY = "converse_res"
 
 alphabet = string.ascii_letters + string.digits
 
@@ -16,202 +19,30 @@ alphabet = string.ascii_letters + string.digits
 def random_string(length):
     return ''.join(random.choice(string.ascii_letters) for _ in range(length))
 
+
 def make_id():
     return ''.join(secrets.choice(alphabet) for i in range(29))
 
 
-@xai_component
-class ConverseMakeServer(Component):
-    secret_key: InArg[str]
-    auth_token: InArg[str]
-    
-    def execute(self, ctx) -> None:
-        app = Flask(
-            'converse', 
-            static_folder="xai_components/xai_converse/public",
-            static_url_path=""
-        )
-        CORS(app)
-        app.secret_key = self.secret_key.value if self.secret_key.value is not None else 'opensesame'
-        app.config['auth_token'] = self.auth_token.value
-        
-        @app.route('/', methods=['GET'])
-        def index():
-            return redirect('/technologic/index.html')
-        
-        @app.route('/technologic/*', methods=['GET'])
-        def technologic():
-            return send_file('public/technologic/index.html')
-        
-        @app.route('/technologic/settings/*', methods=['GET'])
-        def settings():
-            return send_file('public/technologic/index.html')
-        
-        @app.route('/technologic/settings/backends', methods=['GET'])
-        def backends():
-            return send_file('public/technologic/index.html')
-        
-        @app.route('/technologic/settings/backup', methods=['GET'])
-        def backup():
-            return send_file('public/technologic/index.html')
-
-        @app.route('/technologic/new', methods=['GET'])
-        def new_chat():
-            return send_file('public/technologic/index.html')
-
-        @app.route('/technologic/*', methods=['GET'])
-        def chat():
-            return send_file('public/technologic/index.html')
-
-
-        ctx['flask_app'] = app
-
-
-@xai_component
-class ConverseRun(Component):
-    debug_mode: InArg[bool]
-    def execute(self, ctx) -> None:
-        app = ctx['flask_app']
-        # Can't run debug mode from inside jupyter.
-        app.run(
-            debug=self.debug_mode.value if self.debug_mode.value is not None else True,
-            host="0.0.0.0", 
-            port=8080
-        )
-
-
-
-@xai_component
-class ConverseDefineAgent(Component):
-    on_message: BaseComponent
-    
-    name: InCompArg[str]
-    message: OutArg[str]
-    conversation: OutArg[list]
-    
-    def execute(self, ctx) -> None:
-        app = ctx['flask_app']
-        
-        ctx['converse_model_name'] = self.name.value
-        
-        ctx_name = random_string(8)
-        self_name = random_string(8)
-        fn_name = random_string(8)
-        code = f"""
-ctx_{ctx_name} = ctx
-self_{self_name} = self
-@app.route('/chat/completions', methods=['POST'])
-def post_route_fn_{fn_name}():
-    global ctx_{ctx_name}
-    global self_{self_name}
-    
-    self = self_{self_name}
-    ctx = ctx_{ctx_name}
-    app = ctx['flask_app']
-    
-    with app.app_context():
-        if app.config['auth_token']:
-            token = request.headers.get('Authorization')
-            if token.split(" ")[1] != app.config['auth_token']:
-                abort(401)
-    
-    ctx['flask_res'] = None
-    
-    data = request.get_json()
-    model_name = data['model']
-    if model_name != self.name.value:
-        abort("model not found")
-    
-    messages = data.get('messages', [])
-    last_user_message = next((m['content'] for m in reversed(messages) if m['role'] == 'user'), None)
-    
-    self.message.value = last_user_message
-    self.conversation.value = messages
-    
-    stream = data.get('stream', False)
-    
-    if stream:
-        def stream():
-            print("calling on_message")
-            next_component = self_{self_name}.on_message.comp
-            while next_component:
-                next_component = next_component.do(ctx)
-
-                # If there's any intermediate results to stream.  Stream them.
-                if ctx['flask_res']:
-                    for res in ctx['flask_res']:
-                        yield res
-                    ctx['flask_res'] = None
-                
-        return Response(stream(), mimetype='text/event-stream')
-    else:
-        print("calling on_message")
-        next_component = self_{self_name}.on_message
-        while next_component:
-            next_component = next_component.do(ctx)
-        
-        print("returning result")
-        return ctx_{ctx_name}['flask_res']
-        """
-        exec(code, globals(), locals())
-
-
-
-@xai_component
-class ConverseRespond(Component):
-    response: InCompArg[str]
-    
-    def execute(self, ctx) -> None:
-        
-        chat_id = f"chatcmpl-{make_id()}"
-        created = int(time.time())
-        
-        app = ctx['flask_app']
-        
-        with app.app_context():
-            ctx['flask_res'] = jsonify(
-                {
-                    "id": chat_id,
-                    "object": "chat.completion",
-                    "created": created,
-                    "choices": [{
-                        "index": 0,
-                        "message": {
-                        "role": "assistant",
-                        "content": self.response.value,
-                        },
-                        "finish_reason": "stop"
-                    }],
-                    "usage": {
-                        "prompt_tokens": 0,
-                        "completion_tokens": 0,
-                        "total_tokens": 0
-                    }
-                }
-            )
-
-        
-
-
-def make_content_response(content, chat_id, created, model_name):
+def make_content_response(model_name, chat_id, created, content):
     return json.dumps({
-            "choices": [
-                {
-                    "delta": {
-                        "content": content
-                    },
-                    "finish_reason": None,
-                    "index": 0
-                }
-            ],
-            "created": created,
-            "id": chat_id,
-            "model": model_name,
-            "object": "chat.completion.chunk"
-        })
+        "choices": [
+            {
+                "delta": {
+                    "content": content
+                },
+                "finish_reason": None,
+                "index": 0
+            }
+        ],
+        "created": created,
+        "id": chat_id,
+        "model": model_name,
+        "object": "chat.completion.chunk"
+    })
 
 
-def make_finish_response(model_name, created, chat_id):
+def make_finish_response(model_name, chat_id, created):
     return json.dumps({
         "choices": [
             {
@@ -227,69 +58,173 @@ def make_finish_response(model_name, created, chat_id):
     })
 
 
-def stream_answer(ctx, stream, chat_id, created):
-    print("called stream_answer")
-    for chunk in stream:
-        yield f"data: {make_content_response(chunk, chat_id, created, ctx['converse_model_name'])}\n\n"
-        time.sleep(0.05)
-    yield f"data: {make_finish_response(ctx['converse_model_name'], created, chat_id)}\n\n"
+class SendFileRoute(View):
+    def __init__(self, file_path):
+        self.file_path = file_path
+
+    def dispatch_request(self, **kwargs):
+        return send_file(self.file_path)
 
 
-@xai_component
-class ConverseStreamRespond(Component):
-    response: InCompArg[any]
-    
-    def execute(self, ctx) -> None:
+class ChatCompletion(View):
+    def __init__(self, app, ctx):
+        self.app = app
+        self.ctx = ctx
+
+    def dispatch_request(self):
+        app = self.app
+        ctx = self.ctx
+        with app.app_context():
+            if app.config['auth_token']:
+                token = request.headers.get('Authorization')
+                if token.split(" ")[1] != app.config['auth_token']:
+                    abort(401)
+            ctx[CONVERSE_RES_KEY] = None
+
+            data = request.get_json()
+            model_name = data['model']
+
+            agent = ctx.setdefault(CONVERSE_AGENTS_KEY, {}).get(model_name)
+            if agent is None:
+                abort(400, "model not found")
+
+            messages = data.get('messages', [])
+            last_user_message = next((m['content'] for m in reversed(messages) if m['role'] == 'user'), None)
+
+            agent.message.value = last_user_message
+            agent.conversation.value = messages
+
+            is_stream = data.get('stream', False)
+
+            if is_stream:
+                return Response(stream_with_context(self.run_with_stream_format(agent)),
+                                content_type="text/event-stream")
+            else:
+                return self.run_with_single_format(agent)
+
+    def run_with_stream_format(self, agent):
         chat_id = f"chatcmpl-{make_id()}"
         created = int(time.time())
 
-        print("making response")
-        ctx['flask_res'] = stream_answer(ctx, self.response.value, chat_id, created)
+        comp = agent
+        while comp is not None:
+            comp = comp.do(self.ctx)
+            maybe_response = self.ctx.get(CONVERSE_RES_KEY, None)
+            if maybe_response is not None:
+                yield f"data: {make_content_response(agent.name.value, chat_id, created, maybe_response)}\n\n"
+                self.ctx[CONVERSE_RES_KEY] = None
 
+        yield f"data: {make_finish_response(agent.name.value, chat_id, created)}\n\n"
+        yield "data: [DONE]\n\n"
 
-def stream_partial_answer(ctx, stream, chat_id, created):
-    print("called stream_answer")
-    for chunk in stream:
-        yield f"data: {make_content_response(chunk, chat_id, created, ctx['converse_model_name'])}\n\n"
-
-@xai_component
-class ConverseStreamPartialResponse(Component):
-    response: InCompArg[any]
-    
-    def execute(self, ctx) -> None:
+    def run_with_single_format(self, agent):
         chat_id = f"chatcmpl-{make_id()}"
         created = int(time.time())
 
-        print("making response")
-        ctx['flask_res'] = stream_partial_answer(ctx, self.response.value, chat_id, created)
+        output = ""
+
+        comp = agent
+        while comp is not None:
+            comp = comp.do(self.ctx)
+            maybe_response = self.ctx.get(CONVERSE_RES_KEY, None)
+            if maybe_response is not None:
+                output = output + maybe_response
+                self.ctx[CONVERSE_RES_KEY] = None
+
+        with self.app.app_context():
+            return jsonify(
+                {
+                    "id": chat_id,
+                    "object": "chat.completion",
+                    "created": created,
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": output,
+                        },
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0
+                    }
+                }
+            )
 
 
 @xai_component
-class ConverseProcessCommand(Component):
-    on_command: BaseComponent
-    
-    command_string: InCompArg[str]
-    chat_response: InCompArg[str]
-    
-    command: OutArg[str]
-    did_have_tool: OutArg[bool]
-    result_list: OutArg[list]
-    
+class ConverseMakeServer(Component):
+    secret_key: InArg[str]
+    auth_token: InArg[str]
+
     def execute(self, ctx) -> None:
-        text = self.chat_response.value
-        self.did_have_tool.value = self.command_string.value in text
-        self.result_list.value = []
-        
-        if self.did_have_tool.value:
-            lines = text.split("\n")
-            for line in lines:
-                if line.startswith(self.command_string.value):
-                    command = line.split(":", 1)[1].strip()
-                    self.command.value = command
-                    try:
-                        if hasattr(self, 'on_command'):
-                            comp = self.on_command
-                            while comp is not None:
-                                comp = comp.do(ctx)
-                    except Exception as e:
-                        print(e)
+        app = Flask(
+            'converse',
+            static_folder="xai_components/xai_converse/public",
+            static_url_path=""
+        )
+        CORS(app)
+        app.secret_key = self.secret_key.value if self.secret_key.value is not None else 'opensesame'
+        app.config['auth_token'] = self.auth_token.value
+
+        index_routes = [
+            '/technologic',
+            '/technologic/*',
+            '/technologic/settings/*',
+            '/technologic/settings/backends',
+            '/technologic/settings/backup',
+            '/technologic/new',
+        ]
+
+        for index_route in index_routes:
+            app.add_url_rule(
+                index_route,
+                endpoint=index_route.replace("/", "_"),
+                methods=['GET'],
+                view_func=SendFileRoute.as_view(index_route,
+                                                'xai_components/xai_converse/public/technologic/index.html')
+            )
+        app.add_url_rule('/', endpoint='index', methods=['GET'], view_func=lambda: redirect('/technologic'))
+        app.add_url_rule('/chat/completions', methods=['POST'],
+                         view_func=ChatCompletion.as_view('/chat/completions', app, ctx))
+
+        ctx[CONVERSE_APP_KEY] = app
+
+
+@xai_component
+class ConverseRun(Component):
+    debug_mode: InArg[bool]
+
+    def execute(self, ctx) -> None:
+        app = ctx[CONVERSE_APP_KEY]
+        # Can't run debug mode from inside jupyter.
+        app.run(
+            debug=self.debug_mode.value if self.debug_mode.value is not None else False,
+            host="0.0.0.0",
+            port=8080
+        )
+
+
+@xai_component(type='Start', color='red')
+class ConverseDefineAgent(Component):
+    name: InCompArg[str]
+    message: OutArg[str]
+    conversation: OutArg[list]
+
+    def init(self, ctx):
+        ctx.setdefault(CONVERSE_AGENTS_KEY, {})[self.name.value] = self
+
+
+@xai_component(color='#8B008B')
+class ConverseEmitResponse(Component):
+    """Adds the value to the current response
+
+    ##### inPorts:
+    - value: A string to be added to the response. If the value ands in a new line, it will be immediately flushed
+    """
+    value: InArg[str]
+
+    def execute(self, ctx):
+        ctx[CONVERSE_RES_KEY] = self.value.value
