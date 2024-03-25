@@ -1,4 +1,6 @@
 from xai_components.base import InArg, OutArg, InCompArg, Component, BaseComponent, xai_component, SubGraphExecutor
+import inspect
+from pathlib import Path
 import time
 import secrets
 import random
@@ -59,11 +61,16 @@ def make_finish_response(model_name, chat_id, created):
 
 
 class SendFileRoute(View):
-    def __init__(self, file_path):
-        self.file_path = file_path
+    def __init__(self, base_dir, default_file_path):
+        self.base_dir = Path(base_dir)
+        self.default_file_path = default_file_path
 
     def dispatch_request(self, **kwargs):
-        return send_file(self.file_path)
+        if 'path' in kwargs:
+            requested_file = (self.base_dir / kwargs['path'])
+            if requested_file.exists():
+                return send_file(requested_file)
+        return send_file(self.base_dir / self.default_file_path)
 
 
 class ChatCompletion(View):
@@ -160,9 +167,10 @@ class ConverseMakeServer(Component):
     auth_token: InArg[str]
 
     def execute(self, ctx) -> None:
+        public_dir = str(Path(inspect.getfile(inspect.currentframe())).parent.absolute() / "public")
         app = Flask(
             'converse',
-            static_folder="xai_components/xai_converse/public",
+            static_folder=public_dir,
             static_url_path=""
         )
         CORS(app)
@@ -171,11 +179,8 @@ class ConverseMakeServer(Component):
 
         index_routes = [
             '/technologic',
-            '/technologic/*',
-            '/technologic/settings/*',
-            '/technologic/settings/backends',
-            '/technologic/settings/backup',
-            '/technologic/new',
+            '/technologic/',
+            '/technologic/<path:path>'
         ]
 
         for index_route in index_routes:
@@ -183,8 +188,7 @@ class ConverseMakeServer(Component):
                 index_route,
                 endpoint=index_route.replace("/", "_"),
                 methods=['GET'],
-                view_func=SendFileRoute.as_view(index_route,
-                                                'xai_components/xai_converse/public/technologic/index.html')
+                view_func=SendFileRoute.as_view(index_route, public_dir + '/technologic/', 'index.html')
             )
         app.add_url_rule('/', endpoint='index', methods=['GET'], view_func=lambda: redirect('/technologic'))
         app.add_url_rule('/chat/completions', methods=['POST'],
