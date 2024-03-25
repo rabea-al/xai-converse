@@ -232,3 +232,34 @@ class ConverseEmitResponse(Component):
 
     def execute(self, ctx):
         ctx[CONVERSE_RES_KEY] = self.value.value
+
+
+@xai_component
+class ConverseProcessCommand(Component):
+    on_command: BaseComponent
+
+    command_string: InCompArg[str]
+    chat_response: InCompArg[str]
+
+    command: OutArg[str]
+    did_have_tool: OutArg[bool]
+    result_list: OutArg[list]
+
+    def execute(self, ctx) -> None:
+        text = self.chat_response.value
+        self.did_have_tool.value = self.command_string.value in text
+        self.result_list.value = []
+
+        if self.did_have_tool.value:
+            lines = text.split("\n")
+            for line in lines:
+                if line.startswith(self.command_string.value):
+                    command = line.split(":", 1)[1].strip()
+                    self.command.value = command
+                    try:
+                        if hasattr(self, 'on_command'):
+                            comp = self.on_command
+                            while comp is not None:
+                                comp = comp.do(ctx)
+                    except Exception as e:
+                        print(e)
