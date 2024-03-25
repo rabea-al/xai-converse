@@ -161,6 +161,28 @@ class ChatCompletion(View):
             )
 
 
+class ModelsList(View):
+    def __init__(self, app, ctx):
+        self.app = app
+        self.ctx = ctx
+
+    def dispatch_request(self):
+        agents = self.ctx.setdefault(CONVERSE_AGENTS_KEY, {}).keys()
+        with self.app.app_context():
+            return jsonify({
+                "object": "list",
+                "data": [
+                    {
+                        "id": agent,
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": "organization-owner"
+                    }
+                    for agent in agents
+                ]
+            })
+
+
 @xai_component
 class ConverseMakeServer(Component):
     secret_key: InArg[str]
@@ -191,6 +213,8 @@ class ConverseMakeServer(Component):
                 view_func=SendFileRoute.as_view(index_route, public_dir + '/technologic/', 'index.html')
             )
         app.add_url_rule('/', endpoint='index', methods=['GET'], view_func=lambda: redirect('/technologic'))
+        app.add_url_rule('/models', endpoint='models', methods=['GET'],
+                         view_func=ModelsList.as_view("/models", app, ctx))
         app.add_url_rule('/chat/completions', methods=['POST'],
                          view_func=ChatCompletion.as_view('/chat/completions', app, ctx))
 
