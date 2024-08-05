@@ -1,4 +1,5 @@
-from xai_components.base import InArg, OutArg, InCompArg, Component, BaseComponent, xai_component, SubGraphExecutor
+from xai_components.base import InArg, OutArg, InCompArg, Component, AsyncComponent, BaseComponent, xai_component, \
+    SubGraphExecutor
 import inspect
 from pathlib import Path
 import time
@@ -7,11 +8,14 @@ import random
 import string
 import json
 
-from flask import Flask, Response, request, jsonify, redirect, abort, send_file, stream_with_context
-from flask.views import View
-from flask_cors import CORS
+from quart import Quart, Response, request, jsonify, redirect, abort, send_file, stream_with_context
+from quart.views import View
+from quart_cors import cors
 
-CONVERSE_APP_KEY = "flask_app"
+import asyncio
+
+
+CONVERSE_APP_KEY = "quart_app"
 CONVERSE_AGENTS_KEY = "converse_agents"
 CONVERSE_RES_KEY = "converse_res"
 
@@ -65,30 +69,31 @@ class SendFileRoute(View):
         self.base_dir = Path(base_dir)
         self.default_file_path = default_file_path
 
-    def dispatch_request(self, **kwargs):
+    async def dispatch_request(self, **kwargs):
         if 'path' in kwargs:
             requested_file = (self.base_dir / kwargs['path'])
             if requested_file.exists():
-                return send_file(requested_file)
-        return send_file(self.base_dir / self.default_file_path)
+                return await send_file(requested_file)
+        return await send_file(self.base_dir / self.default_file_path)
 
 
 class ChatCompletion(View):
-    def __init__(self, app, ctx):
+    def __init__(self, app, ctx, lock):
         self.app = app
         self.ctx = ctx
+        self.lock = lock
 
-    def dispatch_request(self):
+    async def dispatch_request(self):
         app = self.app
         ctx = self.ctx
-        with app.app_context():
+        await self.lock.acquire()
+        async with app.app_context():
             if app.config['auth_token']:
                 token = request.headers.get('Authorization')
                 if token.split(" ")[1] != app.config['auth_token']:
                     abort(401)
-            ctx[CONVERSE_RES_KEY] = None
-
-            data = request.get_json()
+            ctx[CONVERSE_RES_KEY] = asyncio.Queue()
+            data = await request.get_json()
             model_name = data['model']
 
             agent = ctx.setdefault(CONVERSE_AGENTS_KEY, {}).get(model_name)
@@ -104,61 +109,73 @@ class ChatCompletion(View):
             is_stream = data.get('stream', False)
 
             if is_stream:
-                return Response(stream_with_context(self.run_with_stream_format(agent)),
-                                content_type="text/event-stream")
+                return stream_with_context(self.run_with_stream_format)(agent), 200, {
+                    'Content-Type': "text/event-stream"}
             else:
-                return self.run_with_single_format(agent)
+                return await self.run_with_single_format(agent)
 
-    def run_with_stream_format(self, agent):
-        chat_id = f"chatcmpl-{make_id()}"
-        created = int(time.time())
+    async def execute_with_output_finished_marker(self, agent):
+        await SubGraphExecutor(agent).do_async(self.ctx)
+        await self.ctx[CONVERSE_RES_KEY].put(None)
 
-        comp = agent
-        while comp is not None:
-            comp = comp.do(self.ctx)
-            maybe_response = self.ctx.get(CONVERSE_RES_KEY, None)
-            if maybe_response is not None:
-                yield f"data: {make_content_response(agent.name.value, chat_id, created, maybe_response)}\n\n"
-                self.ctx[CONVERSE_RES_KEY] = None
+    async def run_with_stream_format(self, agent):
+        try:
+            chat_id = f"chatcmpl-{make_id()}"
+            created = int(time.time())
 
-        yield f"data: {make_finish_response(agent.name.value, chat_id, created)}\n\n"
-        yield "data: [DONE]\n\n"
+            task = asyncio.create_task(self.execute_with_output_finished_marker(agent))
+            while True:
+                maybe_response = await self.ctx[CONVERSE_RES_KEY].get()
+                if maybe_response is not None:
+                    yield f"data: {make_content_response(agent.name.value, chat_id, created, maybe_response)}\n\n"
+                else:
+                    break
+            await task
 
-    def run_with_single_format(self, agent):
-        chat_id = f"chatcmpl-{make_id()}"
-        created = int(time.time())
+            yield f"data: {make_finish_response(agent.name.value, chat_id, created)}\n\n"
+            yield "data: [DONE]\n\n"
+        finally:
+            self.lock.release()
 
-        output = ""
+    async def run_with_single_format(self, agent):
+        try:
+            chat_id = f"chatcmpl-{make_id()}"
+            created = int(time.time())
 
-        comp = agent
-        while comp is not None:
-            comp = comp.do(self.ctx)
-            maybe_response = self.ctx.get(CONVERSE_RES_KEY, None)
-            if maybe_response is not None:
-                output = output + maybe_response
-                self.ctx[CONVERSE_RES_KEY] = None
+            output = ""
 
-        with self.app.app_context():
-            return jsonify(
-                {
-                    "id": chat_id,
-                    "object": "chat.completion",
-                    "created": created,
-                    "choices": [{
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": output,
-                        },
-                        "finish_reason": "stop"
-                    }],
-                    "usage": {
-                        "prompt_tokens": 0,
-                        "completion_tokens": 0,
-                        "total_tokens": 0
+            task = asyncio.create_task(self.execute_with_output_finished_marker(agent))
+            while True:
+                maybe_response = await self.ctx[CONVERSE_RES_KEY].get()
+                if maybe_response is not None:
+                    output = output + maybe_response
+                else:
+                    break
+            await task
+
+            async with self.app.app_context():
+                return jsonify(
+                    {
+                        "id": chat_id,
+                        "object": "chat.completion",
+                        "created": created,
+                        "choices": [{
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": output,
+                            },
+                            "finish_reason": "stop"
+                        }],
+                        "usage": {
+                            "prompt_tokens": 0,
+                            "completion_tokens": 0,
+                            "total_tokens": 0
+                        }
                     }
-                }
-            )
+                )
+        finally:
+            self.lock.release()
 
 
 class ModelsList(View):
@@ -166,9 +183,9 @@ class ModelsList(View):
         self.app = app
         self.ctx = ctx
 
-    def dispatch_request(self):
+    async def dispatch_request(self):
         agents = self.ctx.setdefault(CONVERSE_AGENTS_KEY, {}).keys()
-        with self.app.app_context():
+        async with self.app.app_context():
             return jsonify({
                 "object": "list",
                 "data": [
@@ -189,13 +206,14 @@ class ConverseMakeServer(Component):
     auth_token: InArg[str]
 
     def execute(self, ctx) -> None:
+        lock = asyncio.Lock()
         public_dir = str(Path(inspect.getfile(inspect.currentframe())).parent.absolute() / "public")
-        app = Flask(
+        app = Quart(
             'converse',
             static_folder=public_dir,
             static_url_path=""
         )
-        CORS(app)
+        app = cors(app)
         app.secret_key = self.secret_key.value if self.secret_key.value is not None else 'opensesame'
         app.config['auth_token'] = self.auth_token.value
 
@@ -216,7 +234,7 @@ class ConverseMakeServer(Component):
         app.add_url_rule('/models', endpoint='models', methods=['GET'],
                          view_func=ModelsList.as_view("/models", app, ctx))
         app.add_url_rule('/chat/completions', methods=['POST'],
-                         view_func=ChatCompletion.as_view('/chat/completions', app, ctx))
+                         view_func=ChatCompletion.as_view('/chat/completions', app, ctx, lock))
 
         ctx[CONVERSE_APP_KEY] = app
 
@@ -227,12 +245,20 @@ class ConverseRun(Component):
 
     def execute(self, ctx) -> None:
         app = ctx[CONVERSE_APP_KEY]
+
+        loop = asyncio.get_event_loop()
+
         # Can't run debug mode from inside jupyter.
-        app.run(
+        server = app.run_task(
             debug=self.debug_mode.value if self.debug_mode.value is not None else False,
             host="0.0.0.0",
             port=8080
         )
+
+        if loop.is_running():
+            asyncio.create_task(server)
+        else:
+            loop.run_until_complete(server)
 
 
 @xai_component(type='Start', color='red')
@@ -246,7 +272,7 @@ class ConverseDefineAgent(Component):
 
 
 @xai_component(color='#8B008B')
-class ConverseEmitResponse(Component):
+class ConverseEmitResponse(AsyncComponent):
     """Adds the value to the current response
 
     ##### inPorts:
@@ -254,8 +280,9 @@ class ConverseEmitResponse(Component):
     """
     value: InArg[str]
 
-    def execute(self, ctx):
-        ctx[CONVERSE_RES_KEY] = self.value.value
+    async def execute(self, ctx):
+        response = self.value.value
+        await ctx[CONVERSE_RES_KEY].put(response)
 
 
 @xai_component
@@ -282,8 +309,7 @@ class ConverseProcessCommand(Component):
                     self.command.value = command
                     try:
                         if hasattr(self, 'on_command'):
-                            comp = self.on_command
-                            while comp is not None:
-                                comp = comp.do(ctx)
+                            SubGraphExecutor(self.on_command).do(ctx)
                     except Exception as e:
-                        print(e)
+                        import traceback
+                        traceback.print_exc()
