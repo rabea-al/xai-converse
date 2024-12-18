@@ -8,6 +8,12 @@ readme = "README.md"
 repository = "https://github.com/XpressAI/xai-converse"
 keywords = ["xircuits", "flask", "converse", "agent"]
 
+dependencies = [
+    "Flask==3.0.2",
+    "Flask-APScheduler==1.13.1",
+    "Flask-Cors==4.0.0"
+]
+
 # Xircuits-specific configurations
 [tool.xircuits]
 requirements_path = "requirements.txt"
