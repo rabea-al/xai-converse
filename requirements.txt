@@ -1,2 +1,2 @@
-quart==0.19.6
-quart-cors==0.7.0
+quart==0.20.0
+quart-cors==0.8.0

@@ -1,6 +1,6 @@
 [project]
 name = "xai-converse"
-version = "0.2.0"
+version = "0.3.0"
 description = "Xircuits component library for creating an agent accessible with the OpenAI API."
 authors = [{ name = "XpressAI", email = "eduardo@xpress.ai" }]
 license = "MIT"
@@ -9,9 +9,8 @@ repository = "https://github.com/XpressAI/xai-converse"
 keywords = ["xircuits", "flask", "converse", "agent"]
 
 dependencies = [
-    "Flask==3.0.2",
-    "Flask-APScheduler==1.13.1",
-    "Flask-Cors==4.0.0"
+    "quart==0.20.0",
+    "quart-cors==0.8.0"
 ]
 
 # Xircuits-specific configurations
