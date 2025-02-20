@@ -204,6 +204,8 @@ class ModelsList(View):
 class ConverseMakeServer(Component):
     secret_key: InArg[str]
     auth_token: InArg[str]
+    max_timeout: InArg[int]
+
 
     def execute(self, ctx) -> None:
         lock = asyncio.Lock()
@@ -216,6 +218,8 @@ class ConverseMakeServer(Component):
         app = cors(app)
         app.secret_key = self.secret_key.value if self.secret_key.value is not None else 'opensesame'
         app.config['auth_token'] = self.auth_token.value
+        app.config['RESPONSE_TIMEOUT'] = self.max_timeout.value if self.max_timeout.value is not None else 600
+
 
         index_routes = [
             '/technologic',
