@@ -127,7 +127,7 @@ class ChatCompletion(View):
             task = asyncio.create_task(self.execute_with_output_finished_marker(agent))
             while True:
                 try:
-                    maybe_response = await asyncio.wait_for(self.ctx[CONVERSE_RES_KEY].get(), timeout=30.0)
+                    maybe_response = await asyncio.wait_for(self.ctx[CONVERSE_RES_KEY].get(), timeout=10.0)
                     if maybe_response is not None:
                         yield f"data: {make_content_response(agent.name.value, chat_id, created, maybe_response)}\n\n"
                     else:
