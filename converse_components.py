@@ -120,16 +120,20 @@ class ChatCompletion(View):
 
     async def run_with_stream_format(self, agent):
         try:
+            yield ""
             chat_id = f"chatcmpl-{make_id()}"
             created = int(time.time())
 
             task = asyncio.create_task(self.execute_with_output_finished_marker(agent))
             while True:
-                maybe_response = await self.ctx[CONVERSE_RES_KEY].get()
-                if maybe_response is not None:
-                    yield f"data: {make_content_response(agent.name.value, chat_id, created, maybe_response)}\n\n"
-                else:
-                    break
+                try:
+                    maybe_response = await asyncio.wait_for(self.ctx[CONVERSE_RES_KEY].get(), timeout=30.0)
+                    if maybe_response is not None:
+                        yield f"data: {make_content_response(agent.name.value, chat_id, created, maybe_response)}\n\n"
+                    else:
+                        break
+                except TimeoutError:
+                    yield f"data: {make_content_response(agent.name.value, chat_id, created, '')}\n\n"
             await task
 
             yield f"data: {make_finish_response(agent.name.value, chat_id, created)}\n\n"
